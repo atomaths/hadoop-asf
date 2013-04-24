@@ -1,0 +1,232 @@
+Index: hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-nodemanager/src/main/native/container-executor/impl/container-executor.c
+===================================================================
+--- hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-nodemanager/src/main/native/container-executor/impl/container-executor.c	(revision 1462432)
++++ hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-nodemanager/src/main/native/container-executor/impl/container-executor.c	(working copy)
+@@ -18,6 +18,7 @@
+ 
+ #include "configuration.h"
+ #include "container-executor.h"
++#include "stpncpy.h"
+ 
+ #include <dirent.h>
+ #include <fcntl.h>
+@@ -374,7 +375,11 @@
+     return -1;
+   }
+   for(token = strtok(buffer, "/"); token != NULL; token = strtok(NULL, "/")) {
++#ifdef __APPLE__
++	if (mkdir(token, perm) != 0) {
++#else
+     if (mkdirat(cwd, token, perm) != 0) {
++#endif
+       if (errno != EEXIST) {
+         fprintf(LOGFILE, "Can't create directory %s in %s - %s\n", 
+                 token, path, strerror(errno));
+@@ -383,7 +388,11 @@
+         return -1;
+       }
+     }
+-    int new_dir = openat(cwd, token, O_RDONLY);
++#ifdef __APPLE__
++    int new_dir = open(token, O_RDONLY);
++#else
++	int new_dir = openat(cwd, token, O_RDONLY);
++#endif
+     close(cwd);
+     cwd = new_dir;
+     if (cwd == -1) {
+@@ -929,7 +938,18 @@
+     goto cleanup;
+   }
+ 
++#ifdef __APPLE__
++  fclose(stdin);
++  fflush(LOGFILE);
++  if (LOGFILE != stdout) {
++    fclose(stdout);
++  }
++  if (ERRORFILE != stderr) {
++    fclose(stderr);
++  }
++#else
+   fcloseall();
++#endif
+   umask(0027);
+   if (chdir(work_dir) != 0) {
+     fprintf(LOGFILE, "Can't change directory to %s -%s\n", work_dir,
+@@ -1206,7 +1226,11 @@
+               pair);
+     result = -1; 
+   } else {
++#ifdef __APPLE__
++    if (mount("none", mount_path, 0, controller) == 0) {
++#else
+     if (mount("none", mount_path, "cgroup", 0, controller) == 0) {
++#endif
+       char *buf = stpncpy(hier_path, mount_path, strlen(mount_path));
+       *buf++ = '/';
+       snprintf(buf, PATH_MAX - (buf - hier_path), "%s", hierarchy);
+Index: hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-nodemanager/src/main/native/container-executor/impl/stpncpy.h
+===================================================================
+--- hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-nodemanager/src/main/native/container-executor/impl/stpncpy.h	(revision 0)
++++ hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-nodemanager/src/main/native/container-executor/impl/stpncpy.h	(revision 0)
+@@ -0,0 +1,36 @@
++#ifdef __APPLE__
++#include <string.h>
++
++static size_t strnlen (const char* string, size_t maxlen)
++{
++  size_t count = 0;
++  for (; maxlen > 0 && *string != '\0'; maxlen--, string++)
++    count++;
++
++  return count;
++}
++
++static inline char*
++stpncpy(char* dst, const char* src, size_t maxlen) {
++    const size_t srclen = strnlen(src, maxlen);
++    if (srclen < maxlen) {
++        //  The stpncpy() and strncpy() functions copy at most maxlen
++        //  characters from src into dst.
++        memcpy(dst, src, srclen);
++        //  If src is less than maxlen characters long, the remainder
++        //  of dst is filled with '\0' characters.
++        memset(dst+srclen, 0, maxlen-srclen);
++        //  The stpcpy() and stpncpy() functions return a pointer to the
++        //  terminating '\0' character of dst.
++        return dst+srclen;
++    } else {
++        //  The stpncpy() and strncpy() functions copy at most maxlen
++        //  characters from src into dst.
++        memcpy(dst, src, maxlen);
++        //  If stpncpy() does not terminate dst with a NUL character, it
++        //  instead returns a pointer to src[maxlen] (which does not
++        //  necessarily refer to a valid memory location.)
++        return dst+maxlen;
++    }
++}
++#endif
+Index: hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-nodemanager/src/main/native/container-executor/impl/configuration.c
+===================================================================
+--- hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-nodemanager/src/main/native/container-executor/impl/configuration.c	(revision 1462432)
++++ hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-nodemanager/src/main/native/container-executor/impl/configuration.c	(working copy)
+@@ -21,6 +21,7 @@
+ 
+ #include "configuration.h"
+ #include "container-executor.h"
++#include "getline.h"
+ 
+ #include <errno.h>
+ #include <unistd.h>
+Index: hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-nodemanager/src/main/native/container-executor/impl/getline.h
+===================================================================
+--- hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-nodemanager/src/main/native/container-executor/impl/getline.h	(revision 0)
++++ hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-nodemanager/src/main/native/container-executor/impl/getline.h	(revision 0)
+@@ -0,0 +1,29 @@
++#ifdef __APPLE__
++#include <sys/types.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++static inline ssize_t
++getline(char **outbuf, size_t *outsize, FILE *fp)
++{
++	size_t len;
++
++	char *buf;
++	buf = fgetln(fp, &len);
++	if (buf == NULL)
++		return (-1);
++
++	/* Assumes realloc() accepts NULL for ptr (C99) */
++	if (*outbuf == NULL || *outsize < len + 1) {
++		void *tmp = realloc(*outbuf, len + 1);
++		if (tmp == NULL)
++			return (-1);
++		*outbuf = tmp;
++		*outsize = len + 1;
++	}
++	memcpy(*outbuf, buf, len);
++	(*outbuf)[len] = '\0';
++	return (len);
++}
++#endif
+Index: hadoop-hdfs-project/hadoop-hdfs/src/main/native/util/posix_util.h
+===================================================================
+--- hadoop-hdfs-project/hadoop-hdfs/src/main/native/util/posix_util.h	(revision 1462432)
++++ hadoop-hdfs-project/hadoop-hdfs/src/main/native/util/posix_util.h	(working copy)
+@@ -16,6 +16,10 @@
+  * limitations under the License.
+  */
+ 
++#ifdef __APPLE__
++#include <sys/syslimits.h>
++#endif
++
+ #ifndef __POSIX_UTIL_H__
+ #define __POSIX_UTIL_H__
+ 
+Index: hadoop-common-project/hadoop-common/src/main/native/src/org/apache/hadoop/security/JniBasedUnixGroupsNetgroupMapping.c
+===================================================================
+--- hadoop-common-project/hadoop-common/src/main/native/src/org/apache/hadoop/security/JniBasedUnixGroupsNetgroupMapping.c	(revision 1462432)
++++ hadoop-common-project/hadoop-common/src/main/native/src/org/apache/hadoop/security/JniBasedUnixGroupsNetgroupMapping.c	(working copy)
+@@ -73,27 +73,39 @@
+   // was successful or not (as long as it was called we need to call
+   // endnetgrent)
+   setnetgrentCalledFlag = 1;
+-#ifndef __FreeBSD__
+-  if(setnetgrent(cgroup) == 1) {
++
++#ifdef __APPLE__
++     setnetgrent(cgroup);
++#elif __FreeBSD__
++     setnetgrent(cgroup);
++#else
++     if(setnetgrent(cgroup) == 1) {
+ #endif
+-    current = NULL;
+-    // three pointers are for host, user, domain, we only care
+-    // about user now
+-    char *p[3];
+-    while(getnetgrent(p, p + 1, p + 2)) {
+-      if(p[1]) {
+-        current = (UserList *)malloc(sizeof(UserList));
+-        current->string = malloc(strlen(p[1]) + 1);
+-        strcpy(current->string, p[1]);
+-        current->next = userListHead;
+-        userListHead = current;
+-        userListSize++;
+-      }
+-    }
+-#ifndef __FreeBSD__
+-  }
++	  current = NULL;
++	  // three pointers are for host, user, domain, we only care
++	  // about user now
++	  char *p[3];
++	  while(getnetgrent(p, p + 1, p + 2)) {
++		if(p[1]) {
++		  current = (UserList *)malloc(sizeof(UserList));
++		  current->string = malloc(strlen(p[1]) + 1);
++		  strcpy(current->string, p[1]);
++		  current->next = userListHead;
++		  userListHead = current;
++		  userListSize++;
++		}
++	  }
++#ifdef __APPLE__
++	  if (userListSize == 0)
++		  goto END;
++#elif __FreeBSD__
++	  if (userListSize == 0)
++		  goto END;
++#else
++     }
+ #endif
+ 
++
+   //--------------------------------------------------
+   // build return data (java array)
+ 
