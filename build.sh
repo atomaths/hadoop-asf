@@ -1,3 +1,6 @@
+#!/usr/bin/env bash
+set -e
+
 SNAPPY_VERSION=1.0.5
 PROTOBUF_VERSION=2.4.1
 HADOOP_VERSION=2.0.3-alpha-src
